@@ -1,0 +1,11 @@
+[ModMeta]
+schema=1
+name=Milkyroute's Automatic Depots
+author=Milkyroute
+desc=A script that automates train movements from and into depots.
+version=0.1
+
+[Script]
+id = milkyroute_automatic_depots_01
+name= Milkyroute's Automatic Depots
+source = src/mad.nimbyscript

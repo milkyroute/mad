@@ -1,0 +1,333 @@
+script meta {
+    lang: nimbyscript.v1,
+    api: nimbyrails.v1,
+    description: [
+        "A script that automates train movements from and into depots.",
+        "For this script to work, activate 'Can be assigned to depot' for your trains.",
+        "Three signal extensions are added by this mod:",
+        "-> Entry signal: put it at every entry point of your depot.",
+        "-> Assign signal: put it where you want to change the depot assigned to your trains.",
+        "-> Free tracks signal: put it before your terminus stops to automatically send idle trains to depot if there are no free tracks when a new train arrives.",
+        "To create a depot, activate the 'Depot' extension to your depot lines.",
+    ],
+}
+
+// Trains out of depot take their shifts with this number of seconds in advance
+const shift_setup_delay: i64 = 10;
+
+pub struct Depot extend Line {
+    meta {
+        label: "Depot",
+    },
+    inactivity_delay: i64 meta {
+        label: "Send to depot after",
+        description: "In seconds",
+        default: 300,
+    },
+    accept_tag: ID<Tag> meta {
+        label: "Tag",
+        description: "Accepts shifts or schedules that have this tag. Accepts anything if undefined.",
+    },
+}
+
+pub struct AssignDepot extend Signal {
+    meta {
+        label: "Assign trains to depot",
+    },
+    depot: ID<Line> meta {
+        label: "Depot line",
+    },
+}
+
+pub fn AssignDepot::event_signal_pass_by(
+    self: &AssignDepot,
+    ctx: &EventCtx,
+    train: &Train,
+    motion: &Motion,
+    signal: &Signal,
+    sc: &mut SimController
+) {
+    let depot_line &= ctx.db.view(self.depot) else { return; }
+    let depot &= ctx.db.view<Depot>(depot_line) else { return; }
+    
+    let rfda = RunFromDepotActivated::new();
+    rfda.in_depot = false;
+    rfda.depot = self.depot;
+    sc.queue_attach(train, rfda);
+
+    let set_idle_task = SetIdle::new();
+    sc.queue_task_event_train(set_idle_task, train, TaskEventTrain::ShiftUnassign);
+}
+
+pub struct EnterDepot extend Signal {
+    meta {
+        label: "Depot entry signal",
+    },
+    depot: ID<Line> meta {
+        label: "Depot line",
+    },
+}
+
+pub fn EnterDepot::event_signal_pass_by(
+    self: &EnterDepot,
+    ctx: &EventCtx,
+    train: &Train,
+    motion: &Motion,
+    signal: &Signal,
+    sc: &mut SimController
+) {
+    // If the train has a run, it is exiting the depot, not entering
+    if let run_dispatch &= motion.run_dispatch.get() {
+        if !run_dispatch.run.line_id.equals(self.depot) {
+            log("Train @ passes through depot signal but not running depot line", train);
+            return;
+        }
+    }
+
+    let rfda = RunFromDepotActivated::new();
+    rfda.in_depot = true;
+    rfda.depot = self.depot;
+    sc.queue_attach(train, rfda);
+    
+    let exit_depot = ExitDepot::new();
+    sc.queue_task_event_train(exit_depot, train, TaskEventTrain::ShiftAssign);
+}
+
+struct SendToDepot {
+    train_id: ID<Train>,
+}
+
+pub fn SendToDepot::task_run(
+    self: &SendToDepot,
+    ctx: &ControlCtx,
+    sc: &mut SimController
+) {
+    // All cancellation triggers
+    let train &= ctx.db.view(self.train_id) else { return; }
+    let motion &= ctx.sim.view<Motion>(self.train_id) else { return; }
+    let rfda &= ctx.db.view<RunFromDepotActivated>(train) else { return; }
+    if rfda.in_depot && is_valid(motion.presence.get()) {
+        return;
+    }
+    let depot_line &= ctx.db.view(rfda.depot) else { return; }
+    let depot &= ctx.db.view<Depot>(depot_line) else { return; }
+    if  (is_valid(motion.run_dispatch.get())) || 
+        is_valid(motion.schedule_dispatch.get()) { 
+        return; 
+    }
+    
+    sc.queue_train_run_line(train, depot_line, 0);
+    
+    // If intervention'd, won't pass trough the depot signal
+    if !is_valid(motion.presence.get()) {
+        let rfda_new = rfda.clone();
+        rfda_new.in_depot = true;
+        sc.queue_attach(train, rfda_new);
+    }
+}
+
+struct RunFromDepotActivated {
+    in_depot: bool,
+    depot: ID<Line>,
+}
+
+struct ExitDepot {}
+
+pub fn ExitDepot::task_event_train(
+    self: &ExitDepot,
+    ctx: &EventCtx,
+    train: &Train,
+    motion: &Motion,
+    ev: TaskEventTrain,
+    sc: &mut SimController
+) {
+
+    let rfda &= ctx.db.view<RunFromDepotActivated>(train) else { return; }
+    
+    if rfda.in_depot {
+        let rfda_new = rfda.clone();
+        rfda_new.in_depot = false;
+        sc.queue_attach(train, rfda_new);
+    }
+    
+    let set_idle_task = SetIdle::new();
+    sc.queue_task_event_train(set_idle_task, train, TaskEventTrain::ShiftUnassign);
+}
+
+struct SetIdle {}
+
+pub fn SetIdle::task_event_train(
+    self: &SetIdle,
+    ctx: &EventCtx,
+    train: &Train,
+    motion: &Motion,
+    ev: TaskEventTrain,
+    sc: &mut SimController
+) {
+    let rfda &= ctx.db.view<RunFromDepotActivated>(train) else { return; }
+    let depot_line &= ctx.db.view(rfda.depot) else { return; }
+    let depot &= ctx.db.view<Depot>(depot_line) else { return; }
+    
+    if rfda.in_depot {
+        log("Train @ set idle but already in depot?", train);
+        return;
+    }
+    
+    let send_to_depot = SendToDepot::new();
+    send_to_depot.train_id = train.id;
+    sc.queue_task_at(send_to_depot, ctx.extrapolator.clock_us() + (depot.inactivity_delay * 1000000));
+    
+    let exit_depot = ExitDepot::new();
+    sc.queue_task_event_train(exit_depot, train, TaskEventTrain::ShiftAssign);
+}
+
+pub struct RunFromDepot extend Train {
+    meta {
+        label: "Can be assigned to depot",
+    },
+}
+
+pub fn RunFromDepot::event_train_shift_setup(
+    self: &RunFromDepot,
+    ctx: &EventCtx,
+    train: &Train,
+    motion: &Motion,
+    ss: &mut ShiftSetup
+) {
+    let rfda &= ctx.db.view<RunFromDepotActivated>(train) else { return; }
+    if !rfda.in_depot {
+        // Delay to prioritize trains already out of depot
+        ss.epoch_s = ss.epoch_s + shift_setup_delay; 
+    } else {
+        ss.match_pos = false;
+        ss.check_occupation = false;
+    }
+    
+    
+}
+
+pub fn RunFromDepot::event_train_shift_allow(
+    self: &RunFromDepot,
+    ctx: &EventCtx,
+    train: &Train,
+    motion: &Motion,
+    sched: &Schedule,
+    shift: &Shift,
+    run: &Run,
+    stop_idx: i64,
+    arrival_us: i64,
+    pose: &Pose
+): ShiftAllow {
+    
+    // If the upcoming track is occupied, take nothing
+    if let presence &= motion.presence.get() {
+        let next_pos = ctx.db.track_pos_project(presence.pos, 10.);
+        if is_valid(ctx.extrapolator.get_one_occupation(next_pos, train.id)) {
+            return ShiftAllow::Deny;
+        }
+    }
+
+    
+    if let rfda &= ctx.db.view<RunFromDepotActivated>(train) {
+        let depot_line &= ctx.db.view(rfda.depot) else { return ShiftAllow::Deny; }
+        let depot &= ctx.db.view<Depot>(depot_line) else { return ShiftAllow::Deny; }
+        
+        // If the shift is of the depot line, refuse
+        if run.line_id.equals(rfda.depot) {
+            return ShiftAllow::Deny;
+        }
+        
+        // If shift or schedule doesn't has the required tag, refuse
+        if let tag &= ctx.db.view(depot.accept_tag) {
+            if !(sched.tags.contains(tag) || shift.tags.contains(tag)) {
+                return ShiftAllow::Deny;
+            }
+        }
+    }
+        
+    return ShiftAllow::Allow;
+}
+
+pub struct FreeSpaceSignal extend Signal {
+    meta {
+        label: "Send idle trains to depot",
+    },
+    platform_signals: &Vec<ID<Signal>> meta {
+        label: "Platform signals",
+    },
+    max_trains: i64 meta {
+        label: "Max trains at station",
+        default: 1,
+    },
+}
+
+struct TaskCleanStation {
+    freespace_signal: ID<Signal>,
+    train_id: ID<Train>,
+}
+
+pub fn TaskCleanStation::task_run(
+    self: &TaskCleanStation,
+    ctx: &ControlCtx,
+    sc: &mut SimController
+) {
+    let sig &= ctx.db.view(self.freespace_signal) else { return; }
+    let freespace_signal &= ctx.db.view<FreeSpaceSignal>(sig) else { return; }
+    
+    let counter mut= 0;
+    
+    // First check if there are too many trains
+    for signal_id in freespace_signal.platform_signals.iter() {
+        if let platform_signal &= ctx.db.view(signal_id) {
+            let pos_sig = platform_signal.backward();
+            let pos = ctx.db.track_pos_project(pos_sig, 10.);
+            if let train_waiting &= ctx.extrapolator.get_one_reservation(pos, self.train_id) {
+                counter = counter + 1;
+            }
+        }
+    }
+    
+    if counter >= freespace_signal.max_trains {
+        // Then if too many trains, send to depot those that can
+        for signal_id in freespace_signal.platform_signals.iter() {
+            if let platform_signal &= ctx.db.view(signal_id) {
+                let pos_sig = platform_signal.backward();
+                let pos = ctx.db.track_pos_project(pos_sig, 20.);
+                if let train_waiting &= ctx.extrapolator.get_one_reservation(pos, self.train_id) {
+                    if let motion &= ctx.sim.view<Motion>(self.train_id) {
+                        if !is_valid(motion.run_dispatch.get()) && !is_valid(motion.schedule_dispatch.get()) { 
+                            if let rfda &= ctx.db.view<RunFromDepotActivated>(train_waiting) {
+                                if let depot_line &= ctx.db.view(rfda.depot) {
+                                    sc.queue_train_run_line(train_waiting, depot_line, 0);
+                                    counter = counter - 1;
+                                    if counter < freespace_signal.max_trains {
+                                        return;
+                                    }
+                                }
+                               
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+pub fn FreeSpaceSignal::event_signal_pass_by(
+    self: &FreeSpaceSignal,
+    ctx: &EventCtx,
+    train: &Train,
+    motion: &Motion,
+    signal: &Signal,
+    sc: &mut SimController
+) { 
+    let task = TaskCleanStation::new();
+    task.freespace_signal = signal.id;
+    task.train_id = train.id;
+    sc.queue_task(task);
+}
+
+
+
