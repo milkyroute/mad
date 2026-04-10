@@ -3,7 +3,7 @@ schema=1
 name=Milkyroute's Automatic Depots
 author=Milkyroute
 desc=A script that automates train movements from and into depots.
-version=0.1
+version=0.2
 
 [Script]
 id = milkyroute_automatic_depots_01

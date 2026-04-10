@@ -47,6 +47,7 @@ pub fn AssignDepot::event_signal_pass_by(
     signal: &Signal,
     sc: &mut SimController
 ) {
+    if !is_valid(ctx.db.view<RunFromDepot>(train)) { return; }
     let depot_line &= ctx.db.view(self.depot) else { return; }
     let depot &= ctx.db.view<Depot>(depot_line) else { return; }
     
@@ -76,6 +77,7 @@ pub fn EnterDepot::event_signal_pass_by(
     signal: &Signal,
     sc: &mut SimController
 ) {
+    if !is_valid(ctx.db.view<RunFromDepot>(train)) { return; }
     // If the train has a run, it is exiting the depot, not entering
     if let run_dispatch &= motion.run_dispatch.get() {
         if !run_dispatch.run.line_id.equals(self.depot) {
@@ -104,6 +106,7 @@ pub fn SendToDepot::task_run(
 ) {
     // All cancellation triggers
     let train &= ctx.db.view(self.train_id) else { return; }
+    if !is_valid(ctx.db.view<RunFromDepot>(train)) { return; }
     let motion &= ctx.sim.view<Motion>(self.train_id) else { return; }
     let rfda &= ctx.db.view<RunFromDepotActivated>(train) else { return; }
     if rfda.in_depot && is_valid(motion.presence.get()) {
@@ -141,7 +144,7 @@ pub fn ExitDepot::task_event_train(
     ev: TaskEventTrain,
     sc: &mut SimController
 ) {
-
+    if !is_valid(ctx.db.view<RunFromDepot>(train)) { return; }
     let rfda &= ctx.db.view<RunFromDepotActivated>(train) else { return; }
     
     if rfda.in_depot {
@@ -164,6 +167,7 @@ pub fn SetIdle::task_event_train(
     ev: TaskEventTrain,
     sc: &mut SimController
 ) {
+    if !is_valid(ctx.db.view<RunFromDepot>(train)) { return; }
     let rfda &= ctx.db.view<RunFromDepotActivated>(train) else { return; }
     let depot_line &= ctx.db.view(rfda.depot) else { return; }
     let depot &= ctx.db.view<Depot>(depot_line) else { return; }
